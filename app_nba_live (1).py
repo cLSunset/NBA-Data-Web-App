@@ -61,7 +61,10 @@ def get_api_key() -> str | None:
 @st.cache_data(ttl=3600 * 6, show_spinner=False)
 def api_get(endpoint: str, params: dict, api_key: str) -> pd.DataFrame | None:
     """Generic cached GET against api-sports.io. Returns a flattened
-    DataFrame of the 'response' list, or None on any failure."""
+    DataFrame of the 'response' list, or None on any failure. Also stashes
+    the raw JSON in session_state so the UI can surface *why* something
+    came back empty (api-sports.io returns HTTP 200 even for rejected
+    parameters — the real reason lives in the 'errors' field)."""
     try:
         r = requests.get(
             f"{BASE_URL}/{endpoint}",
@@ -69,14 +72,24 @@ def api_get(endpoint: str, params: dict, api_key: str) -> pd.DataFrame | None:
             params=params,
             timeout=REQUEST_TIMEOUT,
         )
+        st.session_state["last_status_code"] = r.status_code
         r.raise_for_status()
         data = r.json()
+        st.session_state["last_raw_json"] = data
+        errors = data.get("errors")
+        if errors:
+            st.session_state["last_api_error"] = f"{endpoint} params={params} -> errors={errors}"
+            return None
         response = data.get("response", [])
         if not response:
+            st.session_state["last_api_error"] = (
+                f"{endpoint} params={params} -> empty response, "
+                f"results={data.get('results')}"
+            )
             return pd.DataFrame()
         return pd.json_normalize(response)
     except Exception as e:
-        st.session_state["last_api_error"] = str(e)
+        st.session_state["last_api_error"] = f"{endpoint} params={params} -> exception: {e}"
         return None
 
 
@@ -104,7 +117,9 @@ if st.sidebar.button("🔄 Clear cache"):
 
 st.sidebar.markdown("---")
 if "last_api_error" in st.session_state:
-    st.sidebar.caption(f"Last API error: {st.session_state['last_api_error']}")
+    st.sidebar.error(f"Last API issue:\n\n{st.session_state['last_api_error']}")
+if "last_status_code" in st.session_state:
+    st.sidebar.caption(f"Last HTTP status: {st.session_state['last_status_code']}")
 
 st.title("NBA Stats Explorer")
 st.caption(f"Season {season}-{str(season + 1)[-2:]}")
